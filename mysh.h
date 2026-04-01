@@ -61,6 +61,13 @@ ssize_t read_line(int fd, char *buf, size_t buf_size);
  */
 int parse_line(const char *raw_line, Pipeline *pipeline);
 
+/*
+ * Free all heap memory allocated by parse_line inside a Pipeline
+ * (strdup'd argument strings, input/output file names).
+ * Safe to call on a zero-initialised or already-freed Pipeline.
+ */
+void free_pipeline(Pipeline *pipeline);
+
 /* ──────────────────────────────────────────────
  * wildcard.c
  * ────────────────────────────────────────────── */

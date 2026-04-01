@@ -19,26 +19,48 @@
 
 void print_prompt(void) {
     char cwd[4096];
-    const char *home;
+    char prompt[4096 + 4]; /* room for "~", path, "$ ", NUL */
 
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
-        /* TODO: handle getcwd error */
         write(STDOUT_FILENO, "$ ", 2);
         return;
     }
 
-    home = getenv("HOME"); /* used below once TODO is implemented */
-    (void)home;           /* suppress unused-variable warning */
+    const char *home     = getenv("HOME");
+    size_t      home_len = (home != NULL) ? strlen(home) : 0;
 
-    /* TODO: if cwd starts with home, replace that prefix with '~' */
-    /* TODO: write "<cwd>$ " to STDOUT_FILENO using write() (not printf) */
+    /*
+     * Replace the home-directory prefix with '~' when:
+     *   - HOME is set and non-empty
+     *   - cwd starts with the home path
+     *   - the match is followed by '/' (sub-directory) or '\0' (home itself)
+     */
+    if (home != NULL && home_len > 0 &&
+        strncmp(cwd, home, home_len) == 0 &&
+        (cwd[home_len] == '/' || cwd[home_len] == '\0')) {
+        snprintf(prompt, sizeof(prompt), "~%s$ ", cwd + home_len);
+    } else {
+        snprintf(prompt, sizeof(prompt), "%s$ ", cwd);
+    }
+
+    write(STDOUT_FILENO, prompt, strlen(prompt));
 }
 
 void print_status(int status) {
-    (void)status; /* TODO: remove once implemented */
-    /* TODO: if WIFEXITED and exit code != 0 → print "Exited with status N"  */
-    /* TODO: if WIFSIGNALED             → print "Terminated by signal X"
-     *       using strsignal() or psignal()                                  */
+    char msg[256];
+    int  len;
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        len = snprintf(msg, sizeof(msg),
+                       "Exited with status %d\n", WEXITSTATUS(status));
+        write(STDOUT_FILENO, msg, (size_t)len);
+    } else if (WIFSIGNALED(status)) {
+        len = snprintf(msg, sizeof(msg),
+                       "Terminated by signal %d: %s\n",
+                       WTERMSIG(status), strsignal(WTERMSIG(status)));
+        write(STDOUT_FILENO, msg, (size_t)len);
+    }
+    /* exit code 0: print nothing */
 }
 
 /* ──────────────────────────────────────────────
@@ -48,7 +70,6 @@ void print_status(int status) {
 int main(int argc, char *argv[]) {
     int   input_fd;
     int   interactive = 0;
-    int   last_status = 0;  /* exit status of most recent command */
 
     /* ── Determine input source ───────────────────────────────────────── */
     if (argc == 1) {
@@ -58,43 +79,46 @@ int main(int argc, char *argv[]) {
         /* Batch mode: open the script file */
         input_fd = open(argv[1], O_RDONLY);
         if (input_fd < 0) {
-            /* TODO: print error and exit with EXIT_FAILURE */
             perror(argv[1]);
             return EXIT_FAILURE;
         }
         interactive = 0;
     } else {
-        /* TODO: print usage message */
         fprintf(stderr, "Usage: %s [script]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
     /* ── Welcome message (interactive only) ──────────────────────────── */
     if (interactive) {
-        /* TODO: write "Welcome to my shell!\n" with write() */
+        const char *welcome = "Welcome to my shell!\n";
+        write(STDOUT_FILENO, welcome, strlen(welcome));
     }
 
     /* ── Main read-eval loop ─────────────────────────────────────────── */
     char    line_buf[BUF_SIZE];
     ssize_t n;
     int     should_exit = 0;
+    int     last_status      = 0;  /* raw waitpid status of last command  */
+    int     print_last_status = 0; /* set to 1 after first real command   */
 
     while (!should_exit) {
-        /* Print prompt in interactive mode */
         if (interactive) {
-            /* TODO: optionally print last_status info here before prompt */
+            /* Print previous command's exit information before the prompt */
+            if (print_last_status) {
+                print_status(last_status);
+                print_last_status = 0;
+            }
             print_prompt();
         }
 
         /* Read one complete line */
         n = read_line(input_fd, line_buf, sizeof(line_buf));
         if (n < 0) {
-            /* TODO: handle read error */
-            break;
+            break; /* EOF or unrecoverable error — exit the loop */
         }
         if (n == 0) {
-            /* EOF */
-            break;
+            /* Empty line — reprint prompt without updating status */
+            continue;
         }
 
         /* Parse the line into a Pipeline */
@@ -104,35 +128,44 @@ int main(int argc, char *argv[]) {
         int parse_result = parse_line(line_buf, &pipeline);
         if (parse_result == 0) {
             /* Empty line or comment — do nothing */
+            free_pipeline(&pipeline);
             continue;
         }
         if (parse_result < 0) {
-            /* Syntax error — skip and continue */
-            /* TODO: print a syntax-error message */
-            last_status = 1;
+            /* parse_line already printed the error and freed the pipeline */
+            free_pipeline(&pipeline);
             continue;
         }
 
         /* Expand wildcards in every sub-command */
         if (expand_pipeline_wildcards(&pipeline) < 0) {
-            /* TODO: handle expansion error */
-            last_status = 1;
+            free_pipeline(&pipeline);
             continue;
         }
 
-        /* Check for the "exit" built-in at the pipeline level */
-        /* (run_builtin / execute_pipeline will set should_exit) */
+        /*
+         * Detect the "exit" built-in anywhere in the pipeline.
+         * We set the flag before running so the loop exits after this
+         * iteration regardless of whether execute_pipeline succeeds.
+         */
+        for (int i = 0; i < pipeline.num_commands; i++) {
+            if (strcmp(pipeline.commands[i].argv[0], "exit") == 0) {
+                should_exit = 1;
+                break;
+            }
+        }
 
         /* Execute */
         last_status = execute_pipeline(&pipeline, interactive);
+        print_last_status = 1;
 
-        /* TODO: in interactive mode, call print_status(last_status) if needed */
-        (void)last_status; /* suppress unused-variable warning until implemented */
+        free_pipeline(&pipeline);
     }
 
     /* ── Goodbye message (interactive only) ─────────────────────────── */
     if (interactive) {
-        /* TODO: write "Exiting my shell.\n" with write() */
+        const char *bye = "Exiting my shell.\n";
+        write(STDOUT_FILENO, bye, strlen(bye));
     }
 
     if (input_fd != STDIN_FILENO) {
