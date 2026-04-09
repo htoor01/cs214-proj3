@@ -36,7 +36,6 @@
 static int name_matches(const char *pattern, const char *filename) {
     const char *star = strchr(pattern, '*');
     if (star == NULL) {
-        /* No wildcard: exact match */
         return strcmp(pattern, filename) == 0;
     }
 
@@ -44,21 +43,18 @@ static int name_matches(const char *pattern, const char *filename) {
     size_t suffix_len = strlen(star + 1);
     size_t name_len   = strlen(filename);
 
-    /* Hidden-file rule: '*' at start of pattern must not match leading '.' */
     if (prefix_len == 0 && filename[0] == '.') {
         return 0;
     }
 
     if (name_len < prefix_len + suffix_len) {
-        return 0;   /* name too short to contain both prefix and suffix */
+        return 0;
     }
 
-    /* Check prefix */
     if (strncmp(pattern, filename, prefix_len) != 0) {
         return 0;
     }
 
-    /* Check suffix */
     if (strcmp(filename + name_len - suffix_len, star + 1) != 0) {
         return 0;
     }
@@ -66,58 +62,68 @@ static int name_matches(const char *pattern, const char *filename) {
     return 1;
 }
 
-/* ──────────────────────────────────────────────
- * compare_strings  (for qsort)
- * ────────────────────────────────────────────── */
 static int compare_strings(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* ──────────────────────────────────────────────
- * expand_wildcard
- *
- * Expand one potentially-wildcarded token into out_argv[out_argc..].
- * Matches are sorted lexicographically and prepended with the directory
- * prefix if the token contained one.
- *
- * Returns the new out_argc (>= original), or -1 on error.
- * ────────────────────────────────────────────── */
+static void free_arg_list(char **argv, int argc) {
+    for (int i = 0; i < argc; i++) {
+        free(argv[i]);
+    }
+}
+
 int expand_wildcard(const char *token, char **out_argv, int out_argc) {
-    /* If no '*' in the token, nothing to expand */
+    if (out_argc >= MAX_ARGS - 1) {
+        write(STDERR_FILENO, "mysh: too many arguments\n", 25);
+        return -1;
+    }
+
     if (strchr(token, '*') == NULL) {
-        /* TODO: strdup(token) and append */
-        out_argv[out_argc++] = (char *)token; /* placeholder */
+        char *copy = strdup(token);
+        if (copy == NULL) {
+            perror("strdup");
+            return -1;
+        }
+        out_argv[out_argc++] = copy;
         return out_argc;
     }
 
-    /* ── Split token into directory prefix and file-name pattern ─────── */
-    char dir_part[PATH_MAX]  = ".";   /* default: current directory */
+    char dir_part[PATH_MAX] = ".";
     char name_pat[PATH_MAX];
 
     const char *last_slash = strrchr(token, '/');
     if (last_slash != NULL) {
-        /* e.g. "baz/foo*bar" → dir="baz", pat="foo*bar" */
         size_t dir_len = (size_t)(last_slash - token);
-        strncpy(dir_part, token, dir_len);
-        dir_part[dir_len] = '\0';
+        if (dir_len == 0) {
+            strncpy(dir_part, "/", sizeof(dir_part) - 1);
+            dir_part[sizeof(dir_part) - 1] = '\0';
+        } else {
+            if (dir_len >= sizeof(dir_part)) {
+                write(STDERR_FILENO, "mysh: path too long\n", 20);
+                return -1;
+            }
+            strncpy(dir_part, token, dir_len);
+            dir_part[dir_len] = '\0';
+        }
         strncpy(name_pat, last_slash + 1, PATH_MAX - 1);
     } else {
         strncpy(name_pat, token, PATH_MAX - 1);
     }
     name_pat[PATH_MAX - 1] = '\0';
 
-    /* ── Scan directory for matches ──────────────────────────────────── */
     DIR *dir = opendir(dir_part);
     if (dir == NULL) {
-        /* Directory unreadable — pass token through unchanged */
-        /* TODO: strdup */
-        out_argv[out_argc++] = (char *)token;
+        char *copy = strdup(token);
+        if (copy == NULL) {
+            perror("strdup");
+            return -1;
+        }
+        out_argv[out_argc++] = copy;
         return out_argc;
     }
 
-    /* Collect matches into a temporary array for sorting */
-    char  *matches[MAX_ARGS];
-    int    match_count = 0;
+    char *matches[MAX_ARGS];
+    int   match_count = 0;
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -125,7 +131,6 @@ int expand_wildcard(const char *token, char **out_argv, int out_argc) {
             continue;
         }
 
-        /* Build full path: "dir_part/d_name" */
         char full[PATH_MAX];
         if (strcmp(dir_part, ".") == 0) {
             snprintf(full, sizeof(full), "%s", entry->d_name);
@@ -133,62 +138,73 @@ int expand_wildcard(const char *token, char **out_argv, int out_argc) {
             snprintf(full, sizeof(full), "%s/%s", dir_part, entry->d_name);
         }
 
-        /* TODO: strdup(full) for the match entry */
-        matches[match_count++] = strdup(full); /* strdup used here — keep */
-        if (match_count >= MAX_ARGS) break;
+        matches[match_count] = strdup(full);
+        if (matches[match_count] == NULL) {
+            perror("strdup");
+            closedir(dir);
+            free_arg_list(matches, match_count);
+            return -1;
+        }
+
+        match_count++;
+        if (match_count >= MAX_ARGS) {
+            break;
+        }
     }
     closedir(dir);
 
     if (match_count == 0) {
-        /* No matches: keep original token */
-        /* TODO: strdup */
-        out_argv[out_argc++] = (char *)token;
+        char *copy = strdup(token);
+        if (copy == NULL) {
+            perror("strdup");
+            return -1;
+        }
+        out_argv[out_argc++] = copy;
         return out_argc;
     }
 
-    /* Sort matches lexicographically */
     qsort(matches, (size_t)match_count, sizeof(char *), compare_strings);
 
-    /* Append matches to out_argv */
+    if (out_argc + match_count > MAX_ARGS - 1) {
+        write(STDERR_FILENO, "mysh: too many arguments\n", 25);
+        free_arg_list(matches, match_count);
+        return -1;
+    }
+
     for (int i = 0; i < match_count; i++) {
-        if (out_argc >= MAX_ARGS - 1) {
-            /* Too many arguments — free remaining and stop */
-            for (int j = i; j < match_count; j++) free(matches[j]);
-            break;
-        }
         out_argv[out_argc++] = matches[i];
     }
 
     return out_argc;
 }
 
-/* ──────────────────────────────────────────────
- * expand_pipeline_wildcards
- *
- * Walk every Command in the Pipeline and expand wildcard tokens in-place.
- * Returns 0 on success, -1 on allocation/other error.
- * ────────────────────────────────────────────── */
 int expand_pipeline_wildcards(Pipeline *pipeline) {
     for (int c = 0; c < pipeline->num_commands; c++) {
         Command *cmd = &pipeline->commands[c];
-
         char *new_argv[MAX_ARGS];
         int   new_argc = 0;
+
+        memset(new_argv, 0, sizeof(new_argv));
 
         for (int a = 0; a < cmd->argc; a++) {
             int result = expand_wildcard(cmd->argv[a], new_argv, new_argc);
             if (result < 0) {
+                free_arg_list(new_argv, new_argc);
                 return -1;
             }
             new_argc = result;
         }
 
-        /* Replace argv with expanded version */
-        /* TODO: carefully free old argv entries that were strdup'd      */
-        /* TODO: copy new_argv into cmd->argv                            */
-        memcpy(cmd->argv, new_argv, (size_t)new_argc * sizeof(char *));
+        for (int a = 0; a < cmd->argc; a++) {
+            free(cmd->argv[a]);
+            cmd->argv[a] = NULL;
+        }
+
+        for (int a = 0; a < new_argc; a++) {
+            cmd->argv[a] = new_argv[a];
+        }
         cmd->argv[new_argc] = NULL;
-        cmd->argc           = new_argc;
+        cmd->argc = new_argc;
     }
 
     return 0;

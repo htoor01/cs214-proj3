@@ -32,24 +32,34 @@ ssize_t read_line(int fd, char *buf, size_t buf_size) {
     char    ch;
     ssize_t n;
 
-    while (total < (ssize_t)(buf_size - 1)) {
+    while (1) {
         do {
             n = read(fd, &ch, 1);
         } while (n < 0 && errno == EINTR);
 
-        if (n < 0)  return -1;              /* real read error          */
-        if (n == 0) { got_eof = 1; break; } /* EOF                      */
-        if (ch == '\n') break;              /* end of line (not stored) */
+        if (n < 0) {
+            return -1;
+        }
+        if (n == 0) {
+            got_eof = 1;
+            break;
+        }
+        if (ch == '\n') {
+            break;
+        }
 
-        buf[total++] = ch;
+        if (total < (ssize_t)(buf_size - 1)) {
+            buf[total++] = ch;
+        }
     }
 
     buf[total] = '\0';
 
-    /* True EOF with no content → signal the caller to stop */
-    if (got_eof && total == 0) return -1;
+    if (got_eof && total == 0) {
+        return -1;
+    }
 
-    return total; /* 0 = empty line, > 0 = line with content */
+    return total;
 }
 
 /* ──────────────────────────────────────────────

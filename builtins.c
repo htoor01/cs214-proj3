@@ -11,14 +11,20 @@
 
 #include "mysh.h"
 
-/* Names of every built-in command */
 static const char *const BUILTIN_NAMES[] = {
     "cd", "pwd", "which", "exit", NULL
 };
 
-/* ──────────────────────────────────────────────
- * is_builtin
- * ────────────────────────────────────────────── */
+static int write_output(int fd, const char *text) {
+    size_t len = strlen(text);
+    ssize_t written = write(fd, text, len);
+    if (written < 0 || (size_t)written != len) {
+        perror("write");
+        return -1;
+    }
+    return 0;
+}
+
 int is_builtin(const char *name) {
     for (int i = 0; BUILTIN_NAMES[i] != NULL; i++) {
         if (strcmp(name, BUILTIN_NAMES[i]) == 0) {
@@ -28,20 +34,10 @@ int is_builtin(const char *name) {
     return 0;
 }
 
-/* ──────────────────────────────────────────────
- * builtin_cd
- *
- * cd [dir]
- *   No argument  → change to HOME
- *   One argument → change to that directory
- *   Otherwise    → error
- * Returns 0 on success, -1 on failure.
- * ────────────────────────────────────────────── */
 static int builtin_cd(const Command *cmd) {
     const char *target;
 
     if (cmd->argc == 1) {
-        /* No argument: go home */
         target = getenv("HOME");
         if (target == NULL) {
             fprintf(stderr, "cd: HOME not set\n");
@@ -55,73 +51,57 @@ static int builtin_cd(const Command *cmd) {
     }
 
     if (chdir(target) < 0) {
-        /* TODO: use write() with a formatted message rather than perror/fprintf
-         *       to be consistent with the POSIX-IO requirement.               */
         perror("cd");
         return -1;
     }
     return 0;
 }
 
-/* ──────────────────────────────────────────────
- * builtin_pwd
- *
- * Print the current working directory to out_fd.
- * Returns 0 on success, -1 on failure.
- * ────────────────────────────────────────────── */
-static int builtin_pwd(int out_fd) {
+static int builtin_pwd(const Command *cmd, int out_fd) {
+    if (cmd->argc != 1) {
+        return -1;
+    }
+
     char cwd[4096];
+    char line[4098];
 
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
         perror("pwd");
         return -1;
     }
 
-    /* TODO: use write(out_fd, …) instead of dprintf for pure POSIX IO */
-    dprintf(out_fd, "%s\n", cwd);
-    return 0;
+    int len = snprintf(line, sizeof(line), "%s\n", cwd);
+    if (len < 0 || (size_t)len >= sizeof(line)) {
+        return -1;
+    }
+
+    return write_output(out_fd, line);
 }
 
-/* ──────────────────────────────────────────────
- * builtin_which
- *
- * which <name>
- *   Prints the resolved path for <name>, or nothing on failure.
- * Returns 0 if found, -1 otherwise.
- * ────────────────────────────────────────────── */
 static int builtin_which(const Command *cmd, int out_fd) {
     if (cmd->argc != 2) {
-        /* wrong number of arguments */
         return -1;
     }
 
     const char *name = cmd->argv[1];
-
-    /* built-in names are not reportable */
     if (is_builtin(name)) {
         return -1;
     }
 
     char resolved[4096];
     if (!resolve_path(name, resolved)) {
-        return -1;   /* not found — print nothing */
+        return -1;
     }
 
-    /* TODO: use write(out_fd, …) instead of dprintf for pure POSIX IO */
-    dprintf(out_fd, "%s\n", resolved);
-    return 0;
+    char line[4098];
+    int len = snprintf(line, sizeof(line), "%s\n", resolved);
+    if (len < 0 || (size_t)len >= sizeof(line)) {
+        return -1;
+    }
+
+    return write_output(out_fd, line);
 }
 
-/* ──────────────────────────────────────────────
- * run_builtin
- *
- * Dispatch to the appropriate built-in handler.
- *
- * out_fd      : file descriptor to use for standard output
- * should_exit : set to 1 when the "exit" command is executed
- *
- * Returns 0 on success, -1 on failure.
- * ────────────────────────────────────────────── */
 int run_builtin(const Command *cmd, int out_fd, int *should_exit) {
     *should_exit = 0;
 
@@ -132,7 +112,7 @@ int run_builtin(const Command *cmd, int out_fd, int *should_exit) {
     }
 
     if (strcmp(name, "pwd") == 0) {
-        return builtin_pwd(out_fd);
+        return builtin_pwd(cmd, out_fd);
     }
 
     if (strcmp(name, "which") == 0) {
@@ -140,11 +120,13 @@ int run_builtin(const Command *cmd, int out_fd, int *should_exit) {
     }
 
     if (strcmp(name, "exit") == 0) {
+        if (cmd->argc != 1) {
+            return -1;
+        }
         *should_exit = 1;
         return 0;
     }
 
-    /* Should never reach here if is_builtin() was checked first */
     fprintf(stderr, "mysh: unknown built-in: %s\n", name);
     return -1;
 }

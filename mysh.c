@@ -133,12 +133,16 @@ int main(int argc, char *argv[]) {
         }
         if (parse_result < 0) {
             /* parse_line already printed the error and freed the pipeline */
+            last_status = (1 << 8);
+            print_last_status = 1;
             free_pipeline(&pipeline);
             continue;
         }
 
         /* Expand wildcards in every sub-command */
         if (expand_pipeline_wildcards(&pipeline) < 0) {
+            last_status = (1 << 8);
+            print_last_status = 1;
             free_pipeline(&pipeline);
             continue;
         }
@@ -149,7 +153,8 @@ int main(int argc, char *argv[]) {
          * iteration regardless of whether execute_pipeline succeeds.
          */
         for (int i = 0; i < pipeline.num_commands; i++) {
-            if (strcmp(pipeline.commands[i].argv[0], "exit") == 0) {
+            if (strcmp(pipeline.commands[i].argv[0], "exit") == 0 &&
+                pipeline.commands[i].argc == 1) {
                 should_exit = 1;
                 break;
             }
