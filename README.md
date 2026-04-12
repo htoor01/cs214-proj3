@@ -3,8 +3,8 @@ CS 214 Spring 2026 — Project III: mysh
 
 Authors
 -------
-Hassan [LastName] — NetID: hXXXXXX
-[Partner FirstName LastName] — NetID: [partner NetID]
+Hassan Ibrahim — NetID: hi125
+Haaris toor — NetID: htoor01 (? dont rem Haaris's netid)
 
 
 Overview
