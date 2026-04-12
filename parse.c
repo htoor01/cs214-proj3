@@ -13,7 +13,7 @@
 #include <errno.h>
 #include <stdlib.h>
 
-/* ──────────────────────────────────────────────
+/* 
  * read_line
  *
  * Read bytes from fd one at a time (read()) until a newline or EOF.
@@ -24,8 +24,7 @@
  *   = 0  — empty line (only a newline was read)
  *   = -1 — EOF with no bytes, or unrecoverable read() error
  *
- * EINTR is retried transparently.
- * ────────────────────────────────────────────── */
+ * EINTR is retried transparently.*/
 ssize_t read_line(int fd, char *buf, size_t buf_size) {
     ssize_t total   = 0;
     int     got_eof = 0;
@@ -33,6 +32,8 @@ ssize_t read_line(int fd, char *buf, size_t buf_size) {
     ssize_t n;
 
     while (total < (ssize_t)(buf_size - 1)) {
+
+        // The do while loop retries reading one byte if it was interruped and reads a single byte
         do {
             n = read(fd, &ch, 1);
         } while (n < 0 && errno == EINTR);
@@ -46,23 +47,23 @@ ssize_t read_line(int fd, char *buf, size_t buf_size) {
 
     buf[total] = '\0';
 
-    /* True EOF with no content → signal the caller to stop */
+    /* If we hit EOT, then we signal the caller to stop */
     if (got_eof && total == 0) return -1;
 
     return total; /* 0 = empty line, > 0 = line with content */
 }
 
-/* ──────────────────────────────────────────────
+/*
  * strip_comment
  *
  * Truncate line at the first '#' character (in-place).
- * ────────────────────────────────────────────── */
+*/
 static void strip_comment(char *line) {
-    char *comment = strchr(line, '#');
+    char *comment = strchr(line, '#'); // To deal with ls # list files
     if (comment) *comment = '\0';
 }
 
-/* ──────────────────────────────────────────────
+/* 
  * next_token
  *
  * Advances *pos past whitespace, then extracts the next token.
@@ -70,7 +71,7 @@ static void strip_comment(char *line) {
  * A regular token is a maximal run of non-whitespace, non-meta chars.
  *
  * Returns a pointer into a static buffer, or NULL at end-of-line.
- * ────────────────────────────────────────────── */
+ */
 static const char *next_token(const char *line, int *pos) {
     static char token_buf[BUF_SIZE];
 
@@ -79,15 +80,16 @@ static const char *next_token(const char *line, int *pos) {
 
     if (line[*pos] == '\0') return NULL;
 
-    /* Single-character meta-tokens */
+    /* <, >, | are special since even if their touching other characters, they are their own tokens
+    example ls>out.txt is still 3 tokens */
     if (line[*pos] == '<' || line[*pos] == '>' || line[*pos] == '|') {
-        token_buf[0] = line[*pos];
-        token_buf[1] = '\0';
+        token_buf[0] = line[*pos]; 
+        token_buf[1] = '\0'; //Puts in token in the array and marks it with the null terminator to show the string ends
         (*pos)++;
         return token_buf;
     }
 
-    /* Regular token: maximal non-whitespace, non-meta run */
+    /* For regular tokens, just keep consuming the token until you hit a space, a null terminator or a special character */
     int i = 0;
     while (line[*pos] != '\0' &&
            line[*pos] != ' '  && line[*pos] != '\t' &&
@@ -98,12 +100,12 @@ static const char *next_token(const char *line, int *pos) {
     return token_buf;
 }
 
-/* ──────────────────────────────────────────────
+/*
  * free_pipeline
  *
  * Free all heap strings allocated by parse_line inside a Pipeline.
  * Safe to call on a zero-initialised or already-freed Pipeline.
- * ────────────────────────────────────────────── */
+ *  */
 void free_pipeline(Pipeline *pipeline) {
     for (int c = 0; c < pipeline->num_commands; c++) {
         Command *cmd = &pipeline->commands[c];
@@ -119,7 +121,7 @@ void free_pipeline(Pipeline *pipeline) {
     }
 }
 
-/* ──────────────────────────────────────────────
+/*
  * parse_line
  *
  * Build a Pipeline from one raw input line.
@@ -129,7 +131,7 @@ void free_pipeline(Pipeline *pipeline) {
  *   1  — pipeline populated (>= 1 sub-command with >= 1 argument each)
  *   0  — empty line (blank or comment only)
  *  -1  — syntax error (pipeline cleaned up before returning)
- * ────────────────────────────────────────────── */
+*/
 int parse_line(const char *raw_line, Pipeline *pipeline) {
     /* Work on a mutable copy so we can strip comments in-place */
     static char work[BUF_SIZE];
@@ -138,6 +140,7 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
 
     strip_comment(work);
 
+    // We zero out the entire pipeline structure and start with one command pointing to the zero slot
     memset(pipeline, 0, sizeof(*pipeline));
     pipeline->num_commands = 1;
     int cmd_idx = 0;
@@ -146,9 +149,11 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
     const char *tok;
 
     while ((tok = next_token(work, &pos)) != NULL) {
+        // Pulling tokens one at the time, where curr referes to the current command
         Command *cur = &pipeline->commands[cmd_idx];
 
-        /* ── Pipe operator ────────────────────────────────────────── */
+        /* If we hit a pipe, we check if theres smth before it and if it exceeds the max commands,
+        if it passes both checks then we increment the command index and number of commands */
         if (strcmp(tok, "|") == 0) {
             if (cur->argc == 0) {
                 write(STDERR_FILENO, "mysh: syntax error near '|'\n", 28);
@@ -163,7 +168,8 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
             cmd_idx++;
             pipeline->num_commands++;
 
-        /* ── Input redirection ────────────────────────────────────── */
+        /* If we hit <, we try to grab the next character and if its NULL or another operator, then 
+        its a syntax operator. The next character should be a file name. */
         } else if (strcmp(tok, "<") == 0) {
             tok = next_token(work, &pos);
             if (tok == NULL ||
@@ -174,11 +180,14 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
                 free_pipeline(pipeline);
                 return -1;
             }
+            // If input file is already set, then return with an error
             if (cur->input_file != NULL) {
                 write(STDERR_FILENO, "mysh: duplicate input redirection\n", 34);
                 free_pipeline(pipeline);
                 return -1;
             }
+
+            // Otherwise strdup copies the filename onto the heap and stores it
             cur->input_file = strdup(tok);
             if (cur->input_file == NULL) {
                 perror("strdup");
@@ -186,7 +195,7 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
                 return -1;
             }
 
-        /* ── Output redirection ───────────────────────────────────── */
+        /* Same thing as our input redirection, but we set it to the outfile instead */
         } else if (strcmp(tok, ">") == 0) {
             tok = next_token(work, &pos);
             if (tok == NULL ||
@@ -209,7 +218,8 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
                 return -1;
             }
 
-        /* ── Normal argument ──────────────────────────────────────── */
+        /* For normal words like ls or grep, we strdup them onto the heap, store them in argv, increment argc and set
+        the last part of argv to NULL for execv since it required argv to be NULL terminated */
         } else {
             if (cur->argc >= MAX_ARGS - 1) {
                 write(STDERR_FILENO, "mysh: too many arguments\n", 25);
@@ -227,12 +237,12 @@ int parse_line(const char *raw_line, Pipeline *pipeline) {
         }
     }
 
-    /* Empty / comment-only line */
+    /* Return 0 if there were no arguments */
     if (pipeline->num_commands == 1 && pipeline->commands[0].argc == 0) {
         return 0;
     }
 
-    /* Trailing '|' — last sub-command has no arguments */
+    /* Return -1 if there was a trailing pipe like this ls |  */
     if (pipeline->commands[pipeline->num_commands - 1].argc == 0) {
         write(STDERR_FILENO, "mysh: syntax error: trailing '|'\n", 33);
         free_pipeline(pipeline);
