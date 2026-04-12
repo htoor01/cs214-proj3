@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "mysh.h"
 
@@ -44,20 +45,21 @@ static int builtin_cd(const Command *cmd) {
         /* No argument: go home */
         target = getenv("HOME");
         if (target == NULL) {
-            fprintf(stderr, "cd: HOME not set\n");
+            write(STDERR_FILENO, "cd: HOME not set\n", 17);
             return -1;
         }
     } else if (cmd->argc == 2) {
         target = cmd->argv[1];
     } else {
-        fprintf(stderr, "cd: too many arguments\n");
+        write(STDERR_FILENO, "cd: too many arguments\n", 23);
         return -1;
     }
 
     if (chdir(target) < 0) {
-        /* TODO: use write() with a formatted message rather than perror/fprintf
-         *       to be consistent with the POSIX-IO requirement.               */
-        perror("cd");
+        const char *err = strerror(errno);
+        write(STDERR_FILENO, "cd: ", 4);
+        write(STDERR_FILENO, err, strlen(err));
+        write(STDERR_FILENO, "\n", 1);
         return -1;
     }
     return 0;
@@ -73,12 +75,15 @@ static int builtin_pwd(int out_fd) {
     char cwd[4096];
 
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
-        perror("pwd");
+        const char *err = strerror(errno);
+        write(STDERR_FILENO, "pwd: ", 5);
+        write(STDERR_FILENO, err, strlen(err));
+        write(STDERR_FILENO, "\n", 1);
         return -1;
     }
 
-    /* TODO: use write(out_fd, …) instead of dprintf for pure POSIX IO */
-    dprintf(out_fd, "%s\n", cwd);
+    write(out_fd, cwd, strlen(cwd));
+    write(out_fd, "\n", 1);
     return 0;
 }
 
@@ -107,8 +112,8 @@ static int builtin_which(const Command *cmd, int out_fd) {
         return -1;   /* not found — print nothing */
     }
 
-    /* TODO: use write(out_fd, …) instead of dprintf for pure POSIX IO */
-    dprintf(out_fd, "%s\n", resolved);
+    write(out_fd, resolved, strlen(resolved));
+    write(out_fd, "\n", 1);
     return 0;
 }
 
@@ -145,6 +150,8 @@ int run_builtin(const Command *cmd, int out_fd, int *should_exit) {
     }
 
     /* Should never reach here if is_builtin() was checked first */
-    fprintf(stderr, "mysh: unknown built-in: %s\n", name);
+    write(STDERR_FILENO, "mysh: unknown built-in: ", 24);
+    write(STDERR_FILENO, name, strlen(name));
+    write(STDERR_FILENO, "\n", 1);
     return -1;
 }

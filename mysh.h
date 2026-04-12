@@ -2,6 +2,7 @@
 #define MYSH_H
 
 #include <sys/types.h>
+#include <stddef.h>
 
 /* ──────────────────────────────────────────────
  * Constants
@@ -93,8 +94,9 @@ int expand_pipeline_wildcards(Pipeline *pipeline);
 /*
  * Execute a fully parsed (and wildcard-expanded) Pipeline.
  * Returns the exit status of the last sub-command (0 = success).
+ * Sets *should_exit to 1 if a parent-executed "exit" built-in ran.
  */
-int execute_pipeline(const Pipeline *pipeline, int interactive);
+int execute_pipeline(const Pipeline *pipeline, int interactive, int *should_exit);
 
 /*
  * Resolve the path for bare-name argv[0].

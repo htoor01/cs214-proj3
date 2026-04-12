@@ -29,12 +29,6 @@ void print_prompt(void) {
     const char *home     = getenv("HOME");
     size_t      home_len = (home != NULL) ? strlen(home) : 0;
 
-    /*
-     * Replace the home-directory prefix with '~' when:
-     *   - HOME is set and non-empty
-     *   - cwd starts with the home path
-     *   - the match is followed by '/' (sub-directory) or '\0' (home itself)
-     */
     if (home != NULL && home_len > 0 &&
         strncmp(cwd, home, home_len) == 0 &&
         (cwd[home_len] == '/' || cwd[home_len] == '\0')) {
@@ -68,15 +62,14 @@ void print_status(int status) {
  * ────────────────────────────────────────────── */
 
 int main(int argc, char *argv[]) {
-    int   input_fd;
-    int   interactive = 0;
+    int input_fd;
+    int interactive = 0;
 
     /* ── Determine input source ───────────────────────────────────────── */
     if (argc == 1) {
         input_fd    = STDIN_FILENO;
         interactive = isatty(STDIN_FILENO);
     } else if (argc == 2) {
-        /* Batch mode: open the script file */
         input_fd = open(argv[1], O_RDONLY);
         if (input_fd < 0) {
             perror(argv[1]);
@@ -84,7 +77,9 @@ int main(int argc, char *argv[]) {
         }
         interactive = 0;
     } else {
-        fprintf(stderr, "Usage: %s [script]\n", argv[0]);
+        write(STDERR_FILENO, "Usage: ", 7);
+        write(STDERR_FILENO, argv[0], strlen(argv[0]));
+        write(STDERR_FILENO, " [script]\n", 10);
         return EXIT_FAILURE;
     }
 
@@ -98,27 +93,19 @@ int main(int argc, char *argv[]) {
     char    line_buf[BUF_SIZE];
     ssize_t n;
     int     should_exit = 0;
-    int     last_status      = 0;  /* raw waitpid status of last command  */
-    int     print_last_status = 0; /* set to 1 after first real command   */
 
     while (!should_exit) {
         if (interactive) {
-            /* Print previous command's exit information before the prompt */
-            if (print_last_status) {
-                print_status(last_status);
-                print_last_status = 0;
-            }
             print_prompt();
         }
 
         /* Read one complete line */
         n = read_line(input_fd, line_buf, sizeof(line_buf));
         if (n < 0) {
-            break; /* EOF or unrecoverable error — exit the loop */
+            break; /* EOF or unrecoverable error */
         }
         if (n == 0) {
-            /* Empty line — reprint prompt without updating status */
-            continue;
+            continue; /* empty line — re-prompt without printing status */
         }
 
         /* Parse the line into a Pipeline */
@@ -126,13 +113,8 @@ int main(int argc, char *argv[]) {
         memset(&pipeline, 0, sizeof(pipeline));
 
         int parse_result = parse_line(line_buf, &pipeline);
-        if (parse_result == 0) {
-            /* Empty line or comment — do nothing */
-            free_pipeline(&pipeline);
-            continue;
-        }
-        if (parse_result < 0) {
-            /* parse_line already printed the error and freed the pipeline */
+        if (parse_result <= 0) {
+            /* 0 = empty/comment, -1 = syntax error (already reported) */
             free_pipeline(&pipeline);
             continue;
         }
@@ -144,9 +126,11 @@ int main(int argc, char *argv[]) {
         }
 
         /*
-         * Detect the "exit" built-in anywhere in the pipeline.
-         * We set the flag before running so the loop exits after this
-         * iteration regardless of whether execute_pipeline succeeds.
+         * Pre-scan for "exit" to handle the piped case ("foo | exit"):
+         * the child running exit cannot propagate should_exit to the
+         * parent, so we detect it here before executing the pipeline.
+         * For non-piped "exit", execute_pipeline also sets should_exit
+         * via the wired output parameter.
          */
         for (int i = 0; i < pipeline.num_commands; i++) {
             if (strcmp(pipeline.commands[i].argv[0], "exit") == 0) {
@@ -155,9 +139,18 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* Execute */
-        last_status = execute_pipeline(&pipeline, interactive);
-        print_last_status = 1;
+        /* Execute and capture status */
+        int last_status = execute_pipeline(&pipeline, interactive, &should_exit);
+
+        /*
+         * Print exit status immediately after the command completes
+         * (interactive only).  Doing it here — not deferred to the next
+         * iteration — ensures the last command's status is always shown,
+         * even when the next iteration exits the loop.
+         */
+        if (interactive) {
+            print_status(last_status);
+        }
 
         free_pipeline(&pipeline);
     }

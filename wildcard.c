@@ -85,8 +85,9 @@ static int compare_strings(const void *a, const void *b) {
 int expand_wildcard(const char *token, char **out_argv, int out_argc) {
     /* If no '*' in the token, nothing to expand */
     if (strchr(token, '*') == NULL) {
-        /* TODO: strdup(token) and append */
-        out_argv[out_argc++] = (char *)token; /* placeholder */
+        out_argv[out_argc] = strdup(token);
+        if (out_argv[out_argc] == NULL) { perror("strdup"); return -1; }
+        out_argc++;
         return out_argc;
     }
 
@@ -110,8 +111,9 @@ int expand_wildcard(const char *token, char **out_argv, int out_argc) {
     DIR *dir = opendir(dir_part);
     if (dir == NULL) {
         /* Directory unreadable — pass token through unchanged */
-        /* TODO: strdup */
-        out_argv[out_argc++] = (char *)token;
+        out_argv[out_argc] = strdup(token);
+        if (out_argv[out_argc] == NULL) { perror("strdup"); return -1; }
+        out_argc++;
         return out_argc;
     }
 
@@ -140,9 +142,10 @@ int expand_wildcard(const char *token, char **out_argv, int out_argc) {
     closedir(dir);
 
     if (match_count == 0) {
-        /* No matches: keep original token */
-        /* TODO: strdup */
-        out_argv[out_argc++] = (char *)token;
+        /* No matches: keep original token unchanged */
+        out_argv[out_argc] = strdup(token);
+        if (out_argv[out_argc] == NULL) { perror("strdup"); return -1; }
+        out_argc++;
         return out_argc;
     }
 
@@ -183,9 +186,13 @@ int expand_pipeline_wildcards(Pipeline *pipeline) {
             new_argc = result;
         }
 
+        /* Free the old strdup'd argv entries before overwriting */
+        for (int a = 0; a < cmd->argc; a++) {
+            free(cmd->argv[a]);
+            cmd->argv[a] = NULL;
+        }
+
         /* Replace argv with expanded version */
-        /* TODO: carefully free old argv entries that were strdup'd      */
-        /* TODO: copy new_argv into cmd->argv                            */
         memcpy(cmd->argv, new_argv, (size_t)new_argc * sizeof(char *));
         cmd->argv[new_argc] = NULL;
         cmd->argc           = new_argc;
