@@ -15,12 +15,12 @@
 
 #include "mysh.h"
 
-/* ──────────────────────────────────────────────
+/*
  * err_write
  *
- * Replacement for perror(): writes "label: strerror(errno)\n" to
- * stderr using only write() — no buffered stdio.
- * ────────────────────────────────────────────── */
+ * Same idea as perror() but uses write() instead of stdio.
+ * Prints "label: strerror\n" to stderr.
+*/
 static void err_write(const char *label) {
     const char *msg = strerror(errno);
     write(STDERR_FILENO, label, strlen(label));
@@ -29,13 +29,15 @@ static void err_write(const char *label) {
     write(STDERR_FILENO, "\n", 1);
 }
 
-/* ──────────────────────────────────────────────
+/*
  * resolve_path
  *
- * Search /usr/local/bin, /usr/bin, /bin for `name`.
- * On success, write the full path into resolved_path and return 1.
- * Return 0 if not found.
- * ────────────────────────────────────────────── */
+ * Searches /usr/local/bin, /usr/bin, /bin for an executable named `name`.
+ * We use access(X_OK) to check if the file exists and is executable without
+ * having to open it or walk the directory ourselves.
+ *
+ * Returns 1 and fills resolved_path if found, 0 otherwise.
+*/
 int resolve_path(const char *name, char *resolved_path) {
     for (int i = 0; SEARCH_DIRS[i] != NULL; i++) {
         snprintf(resolved_path, PATH_MAX, "%s/%s", SEARCH_DIRS[i], name);
@@ -43,91 +45,85 @@ int resolve_path(const char *name, char *resolved_path) {
             return 1;
         }
     }
-    return 0; /* not found */
+    return 0;
 }
 
-/* ──────────────────────────────────────────────
+/*
  * setup_child_io
  *
- * Called inside the child process (after fork) to configure stdin/stdout
- * before exec.  Handles:
- *   - file redirection (< and >)
- *   - pipe ends passed from the parent
- *   - /dev/null as stdin in batch mode, or in interactive mode when the
- *     command's output goes to a file or pipe (spec §1: children inherit
- *     the terminal "except when the command specifies output redirection
- *     or a pipe")
+ * Called inside the child after fork(), before execv(). Sets up stdin and
+ * stdout by dup2-ing the right file descriptors into place.
  *
- * read_fd  : read end of the upstream pipe (-1 if none)
- * write_fd : write end of the downstream pipe (-1 if none)
- * interactive: 0 → batch mode
+ * The logic for stdin goes in priority order:
+ *   1. explicit < redirect — open the file and dup2 it onto stdin
+ *   2. upstream pipe (read_fd >= 0) — dup2 the pipe read end onto stdin
+ *   3. batch mode, or interactive with output going to a file/pipe — use /dev/null
+ *      (spec says children only inherit the terminal when there's no output
+ *       redirect and no pipe)
+ *   4. plain interactive command — just inherit the terminal, do nothing
  *
- * Returns 0 on success, -1 on error (child should exit).
- * ────────────────────────────────────────────── */
+ * Same idea for stdout: explicit > beats a downstream pipe, otherwise leave it.
+ *
+ * Returns 0 on success, -1 if any open/dup2 fails (child should exit).
+*/
 static int setup_child_io(const Command *cmd,
                           int read_fd, int write_fd,
                           int interactive) {
-    /* ── Standard input ──────────────────────────────────────────────── */
+    // stdin setup
     if (cmd->input_file != NULL) {
-        /* Explicit < redirection */
         int fd = open(cmd->input_file, O_RDONLY);
         if (fd < 0) { err_write(cmd->input_file); return -1; }
         if (dup2(fd, STDIN_FILENO) < 0) { err_write("dup2"); close(fd); return -1; }
         close(fd);
     } else if (read_fd >= 0) {
-        /* Read end of an upstream pipe */
+        // stdin comes from the upstream pipe
         if (dup2(read_fd, STDIN_FILENO) < 0) { err_write("dup2"); return -1; }
     } else if (!interactive || cmd->output_file != NULL || write_fd >= 0) {
-        /*
-         * Use /dev/null for stdin when:
-         *   - batch mode (always), OR
-         *   - interactive mode but output goes to a file (> redirect) or
-         *     pipe, per spec: children inherit terminal stdin "except when
-         *     the command specifies output redirection or a pipe."
-         */
+        // batch mode always gets /dev/null; in interactive mode we also use
+        // /dev/null if output is being redirected or piped somewhere
         int fd = open("/dev/null", O_RDONLY);
         if (fd < 0) { err_write("/dev/null"); return -1; }
         if (dup2(fd, STDIN_FILENO) < 0) { err_write("dup2"); close(fd); return -1; }
         close(fd);
     }
-    /* else: interactive, no output redirect, no pipe → inherit terminal stdin */
 
-    /* ── Standard output ─────────────────────────────────────────────── */
+    // stdout setup
     if (cmd->output_file != NULL) {
-        /* Explicit > redirection: create or truncate, mode 0640 */
-        int fd = open(cmd->output_file,
-                      O_WRONLY | O_CREAT | O_TRUNC,
+        // create or truncate the file, mode 0640 per spec
+        int fd = open(cmd->output_file, O_WRONLY | O_CREAT | O_TRUNC,
                       S_IRUSR | S_IWUSR | S_IRGRP);
         if (fd < 0) { err_write(cmd->output_file); return -1; }
         if (dup2(fd, STDOUT_FILENO) < 0) { err_write("dup2"); close(fd); return -1; }
         close(fd);
     } else if (write_fd >= 0) {
-        /* Write end of a downstream pipe */
+        // stdout goes into the downstream pipe
         if (dup2(write_fd, STDOUT_FILENO) < 0) { err_write("dup2"); return -1; }
     }
 
-    /* Close pipe ends that were passed in (both are duplicated above) */
+    // close the raw pipe ends now that they've been dup2'd into place
+    // if we leave them open the pipe won't get EOF when the writer exits
     if (read_fd  >= 0) close(read_fd);
     if (write_fd >= 0) close(write_fd);
 
     return 0;
 }
 
-/* ──────────────────────────────────────────────
+/*
  * execute_single
  *
- * Fork and exec one sub-command.  Pipe file descriptors are provided
- * by the caller; pass -1 when a side is not connected to a pipe.
+ * Runs one sub-command. Either forks a child and execs, or for non-piped
+ * builtins, runs directly in the parent (cd has to run in the parent or
+ * the chdir won't stick).
  *
- * should_exit   : set to 1 if a parent-executed "exit" built-in ran.
- * builtin_result: set to the built-in's return value (0=ok, 1=fail)
- *                 when the built-in runs in the parent (return == -2).
+ * should_exit   — set to 1 if a parent-executed exit builtin ran
+ * builtin_result — set to the builtin's return value so the caller knows
+ *                  whether it succeeded, since there's no child to waitpid on
  *
  * Returns:
- *   pid > 0  child was forked successfully
- *   -1       fork failed (read_fd/write_fd are already closed)
- *   -2       built-in ran in parent (no child to wait for)
- * ────────────────────────────────────────────── */
+ *   pid > 0 — child was forked, call waitpid on it
+ *      -1   — fork failed (fds already closed)
+ *      -2   — builtin ran in parent, no child to wait for
+*/
 static pid_t execute_single(const Command *cmd,
                              int read_fd, int write_fd,
                              int interactive,
@@ -135,15 +131,15 @@ static pid_t execute_single(const Command *cmd,
                              int *builtin_result) {
     *builtin_result = 0;
 
-    /* ── Non-piped built-in: run directly in parent ───────────────────── */
+    // builtins only run in the parent when they're not part of a pipe
+    // if they're piped (pwd | cat) we fork them like anything else
     if (is_builtin(cmd->argv[0]) && read_fd < 0 && write_fd < 0) {
         int out_fd    = STDOUT_FILENO;
         int opened_fd = -1;
 
-        /* Handle > output redirection for the built-in */
+        // handle > redirect for the builtin (e.g. pwd > file)
         if (cmd->output_file != NULL) {
-            opened_fd = open(cmd->output_file,
-                             O_WRONLY | O_CREAT | O_TRUNC,
+            opened_fd = open(cmd->output_file, O_WRONLY | O_CREAT | O_TRUNC,
                              S_IRUSR | S_IWUSR | S_IRGRP);
             if (opened_fd < 0) {
                 err_write(cmd->output_file);
@@ -157,40 +153,38 @@ static pid_t execute_single(const Command *cmd,
         int ret = run_builtin(cmd, out_fd, &se);
         if (opened_fd >= 0) close(opened_fd);
 
-        if (se) *should_exit = 1;
+        if (se) *should_exit = 1; /* exit builtin ran */
         *builtin_result = (ret != 0) ? 1 : 0;
-        return -2; /* sentinel: no child to wait for */
+        return -2;
     }
 
-    /* ── Forked execution (external program or piped built-in) ─────────── */
     pid_t pid = fork();
     if (pid < 0) {
         err_write("fork");
-        /* Close any pipe fds we were handed so they don't leak */
+        // close the fds we were handed so they don't leak
         if (read_fd  >= 0) close(read_fd);
         if (write_fd >= 0) close(write_fd);
         return -1;
     }
 
     if (pid == 0) {
-        /* ── Child process ─────────────────────────────────────────────── */
+        // we're in the child now — wire up stdin/stdout then exec
         if (setup_child_io(cmd, read_fd, write_fd, interactive) < 0) {
             exit(EXIT_FAILURE);
         }
 
         if (is_builtin(cmd->argv[0])) {
-            /* Built-in inside a pipe: run and exit.
-             * should_exit from run_builtin is ignored — the child exits
-             * regardless; the parent detects "exit" via the pre-scan. */
-            int dummy_se = 0;
-            int ret = run_builtin(cmd, STDOUT_FILENO, &dummy_se);
+            // builtin inside a pipe — run it and exit, the parent already
+            // detected "exit" via the pre-scan so we don't need to propagate
+            int dummy = 0;
+            int ret = run_builtin(cmd, STDOUT_FILENO, &dummy);
             exit(ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
         }
 
-        /* Resolve program path */
+        // figure out the full path to the executable
         char exec_path[PATH_MAX];
         if (strchr(cmd->argv[0], '/') != NULL) {
-            /* Explicit path */
+            // already a path like ./foo or /bin/ls — use it directly
             strncpy(exec_path, cmd->argv[0], PATH_MAX - 1);
             exec_path[PATH_MAX - 1] = '\0';
         } else {
@@ -202,46 +196,48 @@ static pid_t execute_single(const Command *cmd,
         }
 
         execv(exec_path, cmd->argv);
-        /* execv only returns on error */
+        // execv only returns if something went wrong
         err_write(exec_path);
         exit(EXIT_FAILURE);
     }
 
-    /* ── Parent: close pipe ends that belong to this child ──────────── */
+    // parent closes its copies of the pipe ends — the child has them now
+    // if we don't close them, the pipe never gets EOF
     if (read_fd  >= 0) close(read_fd);
     if (write_fd >= 0) close(write_fd);
 
     return pid;
 }
 
-/* ──────────────────────────────────────────────
+/*
  * execute_pipeline
  *
- * Orchestrate the execution of all sub-commands in a pipeline,
- * creating OS pipes between adjacent sub-commands.
+ * Runs all sub-commands in the pipeline, wiring pipes between adjacent ones.
+ * For each stage we create a pipe, hand the write end to the current child
+ * and the read end to the next child, then close our copies in the parent.
  *
- * should_exit: set to 1 if a parent-executed "exit" built-in ran.
+ * should_exit — set to 1 if a parent-executed exit builtin ran
  *
- * Returns the raw waitpid() status for the last sub-command, or a
- * synthetic failure value on setup error.
- * ────────────────────────────────────────────── */
+ * Returns the raw waitpid status of the last sub-command.
+*/
 int execute_pipeline(const Pipeline *pipeline, int interactive, int *should_exit) {
-    int   n    = pipeline->num_commands;
+    int   n = pipeline->num_commands;
     pid_t pids[MAX_COMMANDS];
     int   builtin_results[MAX_COMMANDS];
 
     memset(pids,           -1, sizeof(pids));
     memset(builtin_results, 0, sizeof(builtin_results));
 
-    int prev_read = -1;  /* read end of the pipe from the previous stage */
+    int prev_read = -1; /* read end of the pipe from the previous stage */
 
     for (int i = 0; i < n; i++) {
         int pipe_fds[2] = {-1, -1};
 
+        // only create a pipe if there's a next stage to connect to
         if (i < n - 1) {
-            /* There is a next stage: create a pipe */
             if (pipe(pipe_fds) < 0) {
                 err_write("pipe");
+                // clean up any children we already started before bailing
                 for (int j = 0; j < i; j++) {
                     if (pids[j] > 0) waitpid(pids[j], NULL, 0);
                 }
@@ -257,31 +253,26 @@ int execute_pipeline(const Pipeline *pipeline, int interactive, int *should_exit
                                  should_exit,
                                  &builtin_results[i]);
 
-        /*
-         * For forked children (pids[i] > 0), execute_single already
-         * closed read_fd and write_fd in the parent.
-         * For the builtin-in-parent case (-2), read_fd and write_fd were
-         * both -1 (the in-parent path requires no pipe), so nothing to close.
-         * For fork failure (-1), execute_single closes them before returning.
-         */
+        // execute_single closes read_fd and write_fd for us in all cases
+        // (inside the child via setup_child_io, in the parent after fork,
+        // or before returning -1 on fork failure)
 
-        prev_read = pipe_fds[0]; /* read end becomes input for next stage */
+        prev_read = pipe_fds[0]; /* save read end for the next stage */
 
         if (pids[i] == -1) {
-            /* Fork failed — clean up the remaining read end and bail */
+            // fork failed — clean up the pipe read end we just saved
             if (prev_read >= 0) { close(prev_read); prev_read = -1; }
             break;
         }
     }
 
-    /* Close the last read end if it was never consumed */
     if (prev_read >= 0) close(prev_read);
 
-    /* Wait for all children; capture the last child's status */
+    // wait for everyone; we only care about the last child's exit status
     int last_status = 0;
     for (int i = 0; i < n; i++) {
         if (pids[i] == -2) {
-            /* Built-in ran in parent — synthesise a waitpid-style status */
+            // builtin ran in parent — synthesise a waitpid-style status value
             if (i == n - 1) {
                 last_status = builtin_results[i] ? (1 << 8) : 0;
             }
