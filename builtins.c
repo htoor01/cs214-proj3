@@ -53,6 +53,10 @@ static int builtin_cd(const Command *cmd) {
         return -1;
     }
 
+    /*
+    * chdir actually changes the directory but if it fails then we 
+    * write to stdir manually with 3 seperate write commands
+    */
     if (chdir(target) < 0) {
         const char *err = strerror(errno);
         write(STDERR_FILENO, "cd: ", 4);
@@ -90,10 +94,10 @@ static int builtin_pwd(int out_fd) {
  *
  * Looks up where a program lives and prints the path.
  * Prints nothing and returns -1 for builtin names and programs we can't find —
- * that's what the spec requires.
+ * that's what the spec told us to do.
 */
 static int builtin_which(const Command *cmd, int out_fd) {
-    if (cmd->argc != 2) return -1;
+    if (cmd->argc != 2) return -1; /* which cd returns nothing */
 
     const char *name = cmd->argv[1];
 

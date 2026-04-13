@@ -19,6 +19,7 @@
  * err_write
  *
  * Same idea as perror() but uses write() instead of stdio.
+ * Using this since the Project wants POSIX unbuffered I/O
  * Prints "label: strerror\n" to stderr.
 */
 static void err_write(const char *label) {
