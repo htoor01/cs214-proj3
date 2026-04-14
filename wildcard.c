@@ -106,7 +106,7 @@ int expand_wildcard(const char *token, char **out_argv, int out_argc) {
 
         // build the full path — if dir_part is "." we skip the prefix
         // so we get "foo.c" not "./foo.c"
-        char full[PATH_MAX];
+        char full[PATH_MAX + NAME_MAX + 2];
         if (strcmp(dir_part, ".") == 0) {
             snprintf(full, sizeof(full), "%s", entry->d_name);
         } else {
